@@ -20,22 +20,44 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def is_gray(color):
-    """Verifica se a cor é um tom de cinza dentro da tolerância."""
+def compute_effective_color(color, opacity):
+    """Calcula a cor visual em um fundo branco, considerando a opacidade."""
+    if opacity is None:
+        opacity = 1.0
+        
+    if isinstance(color, (float, int)):
+        return color * opacity + (1 - opacity)
+        
+    if len(color) == 3:
+        r, g, b = color
+        return (
+            r * opacity + (1 - opacity),
+            g * opacity + (1 - opacity),
+            b * opacity + (1 - opacity)
+        )
+    return color
+
+def is_field_background(color):
+    """Verifica se a cor é adequada para ser um fundo de campo (tons claros)."""
     if not color:
         return False
     
     # Se a cor for um único float (escala de cinza pura)
     if isinstance(color, (float, int)):
-        return GRAY_TOLERANCE_MIN[0] <= color <= GRAY_TOLERANCE_MAX[0]
+        return 0.75 <= color <= 1.0
 
     # Se a cor for RGB (tupla de 3)
     if len(color) == 3:
         r, g, b = color
-        # Verifica se R, G e B são quase iguais (neutro)
-        if not (abs(r - g) < 0.05 and abs(g - b) < 0.05):
-            return False
-        return (GRAY_TOLERANCE_MIN[0] <= r <= GRAY_TOLERANCE_MAX[0])
+        # Aceita se a média for clara (acima de 0.75) ou se todos componentes forem > 0.75
+        threshold = 0.75
+        if r > threshold and g > threshold and b > threshold:
+            return True
+            
+        if (r + g + b) / 3 > 0.75:
+            return True
+            
+        return False
     
     return False
 
@@ -55,18 +77,68 @@ def process_pdf(input_stream):
         paths = page.get_drawings()
         replacements = []
 
-        # 1. Detectar retângulos cinzas
+        # 1. Detectar retângulos com fundo claro (campos)
         for path in paths:
-            if path.get('fill') and is_gray(path['fill']):
-                rect = path['rect']
+            fill = path.get('fill')
+            if fill:
+                opacity = path.get('fill_opacity', 1.0)
+                # IMPORTANTE: Calcula a cor real visualizada (blend com fundo branco)
+                effective_color = compute_effective_color(fill, opacity)
                 
-                # Check if there is existing text in this area
-                if page.get_text("text", clip=rect).strip():
-                    continue
+                if is_field_background(effective_color):
+                    # LÓGICA REFINADA:
+                    # 1. Filtro de complexidade: Evitar logos, mas permitir retângulos arredondados
+                    # - Retângulos simples ('re') = 1 item
+                    # - Quadriláteros (4 linhas) = 4 items
+                    # - Retângulos arredondados (linhas + curvas) = ~8 items
+                    # - Estrela/Polígonos complexos = >10 items
                     
-                replacements.append(rect)
-                # "Apaga" o desenho cinza original desenhando um retângulo branco por cima
-                page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), width=0)
+                    items = path.get('items', [])
+                    valid_shape = False
+                    
+                    if len(items) == 1 and items[0][0] == 're':
+                        valid_shape = True
+                    elif len(items) <= 9:
+                        # Permite formas simples mistas (linhas e curvas), ex: rounded rects
+                        # Verifica se contém apenas linhas e curvas
+                        valid_types = {'l', 'c', 're'}
+                        current_types = {item[0] for item in items}
+                        
+                        if current_types.issubset(valid_types):
+                            # Se tiver curvas, deve ter linhas também (para evitar círculos/ovais puros que podem ser logos)
+                            # Exceção: se for um círculo perfeito pequeno (radio button), mas aqui estamos filtrando genérico
+                            if 'c' in current_types and 'l' not in current_types:
+                                valid_shape = False
+                            else:
+                                valid_shape = True
+
+                    if not valid_shape:
+                        continue
+
+                    rect = path['rect']
+                    
+                    # 2. Filtro de Tamanho: Evitar pequenos artefatos
+                    width = rect.width
+                    height = rect.height
+                    
+                    # Lógica de Checkbox existente no código verifica proporção depois.
+                    # Vamos permitir passar se for pequeno E quadrado (potencial checkbox)
+                    ratio = width / height if height > 0 else 0
+                    is_square = 0.8 <= ratio <= 1.2
+                    is_potential_checkbox = (width < 30 and height < 30 and is_square)
+
+                    if not is_potential_checkbox:
+                        # Se não for checkbox, exige tamanho mínimo de um campo de texto
+                        if width < 20 or height < 10:
+                            continue
+
+                    # Check if there is existing text in this area
+                    if page.get_text("text", clip=rect).strip():
+                        continue
+                        
+                    replacements.append(rect)
+                    # "Apaga" o desenho cinza original desenhando um retângulo branco por cima
+                    page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), width=0)
 
         # 2. Criar campos interativos nos locais detectados
         for rect in replacements:
@@ -94,7 +166,7 @@ def process_pdf(input_stream):
                 widget.field_name = f"txt_multi_{int(rect.x0)}_{int(rect.y0)}"
                 widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
                 widget.text_font = font_name
-                widget.text_fontsize = 10 # Fixed small size for observations 
+                widget.text_fontsize = 10 
                 widget.field_flags = fitz.PDF_TX_FIELD_IS_MULTILINE
                 page.add_widget(widget)
             
