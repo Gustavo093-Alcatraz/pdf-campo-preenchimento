@@ -162,6 +162,7 @@ def process_pdf(input_stream):
                 widget.field_name = f"chk_{int(rect.x0)}_{int(rect.y0)}"
                 widget.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
                 widget.field_value = False
+                widget.field_bgcolor = (0.9, 0.95, 1.0)
                 page.add_widget(widget)
             
             elif height > 50:
@@ -173,6 +174,7 @@ def process_pdf(input_stream):
                 widget.text_font = font_name
                 widget.text_fontsize = 10 
                 widget.field_flags = fitz.PDF_TX_FIELD_IS_MULTILINE
+                widget.field_bgcolor = (0.9, 0.95, 1.0)
                 page.add_widget(widget)
             
             else:
@@ -183,6 +185,7 @@ def process_pdf(input_stream):
                 widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
                 widget.text_font = font_name
                 widget.text_fontsize = max(8, height * 0.6)
+                widget.field_bgcolor = (0.9, 0.95, 1.0)
                 page.add_widget(widget)
 
     output_buffer = io.BytesIO()
