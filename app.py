@@ -96,6 +96,10 @@ def process_pdf(input_stream):
                     items = path.get('items', [])
                     valid_shape = False
                     
+                    rect = path['rect']
+                    width = rect.width
+                    height = rect.height
+
                     if len(items) == 1 and items[0][0] == 're':
                         valid_shape = True
                     elif len(items) <= 9:
@@ -106,26 +110,27 @@ def process_pdf(input_stream):
                         
                         if current_types.issubset(valid_types):
                             # Se tiver curvas, deve ter linhas também (para evitar círculos/ovais puros que podem ser logos)
-                            # Exceção: se for um círculo perfeito pequeno (radio button), mas aqui estamos filtrando genérico
+                            # Exceção: se for um círculo pequeno (radio button)
                             if 'c' in current_types and 'l' not in current_types:
-                                valid_shape = False
+                                ratio = width / height if height > 0 else 0
+                                is_square = 0.8 <= ratio <= 1.2
+                                if width < 40 and height < 40 and is_square:
+                                    valid_shape = True
+                                else:
+                                    valid_shape = False
                             else:
                                 valid_shape = True
 
                     if not valid_shape:
                         continue
-
-                    rect = path['rect']
                     
                     # 2. Filtro de Tamanho: Evitar pequenos artefatos
-                    width = rect.width
-                    height = rect.height
                     
                     # Lógica de Checkbox existente no código verifica proporção depois.
                     # Vamos permitir passar se for pequeno E quadrado (potencial checkbox)
                     ratio = width / height if height > 0 else 0
                     is_square = 0.8 <= ratio <= 1.2
-                    is_potential_checkbox = (width < 30 and height < 30 and is_square)
+                    is_potential_checkbox = (width < 40 and height < 40 and is_square)
 
                     if not is_potential_checkbox:
                         # Se não for checkbox, exige tamanho mínimo de um campo de texto
@@ -148,7 +153,7 @@ def process_pdf(input_stream):
             # Lógica de Classificação
             ratio = width / height if height > 0 else 0
             is_square = 0.8 <= ratio <= 1.2
-            is_small = width < 30 and height < 30 
+            is_small = width < 40 and height < 40 
             
             if is_small and is_square:
                 # Checkbox
