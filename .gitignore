@@ -30,7 +30,13 @@ env/
 
 # Project specific
 repro_test.pdf
-verify_change.py
-test_text_detection.py
-repro_error.py
-verify_fix.py
+verify_*.py
+repro_*.py
+test_*.py
+test_*.pdf
+analyze_pdf.py
+analysis.txt
+scratch/
+.vscode/
+temp/
+*.pdf

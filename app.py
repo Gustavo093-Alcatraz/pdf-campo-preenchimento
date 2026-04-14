@@ -61,6 +61,22 @@ def is_field_background(color):
     
     return False
 
+def are_overlapping(rect1, rect2, threshold=0.8):
+    """Verifica se dois retângulos se sobrepõem significativamente."""
+    intersect = rect1 & rect2
+    if intersect.is_empty:
+        return False
+    
+    area1 = rect1.width * rect1.height
+    area2 = rect2.width * rect2.height
+    smaller_area = min(area1, area2)
+    
+    if smaller_area <= 0:
+        return False
+        
+    overlap_pct = intersect.get_area() / smaller_area
+    return overlap_pct >= threshold
+
 def process_pdf(input_stream):
     doc = fitz.open(stream=input_stream, filetype="pdf")
     
@@ -88,34 +104,34 @@ def process_pdf(input_stream):
                 if is_field_background(effective_color):
                     # LÓGICA REFINADA:
                     # 1. Filtro de complexidade: Evitar logos, mas permitir retângulos arredondados
-                    # - Retângulos simples ('re') = 1 item
-                    # - Quadriláteros (4 linhas) = 4 items
-                    # - Retângulos arredondados (linhas + curvas) = ~8 items
-                    # - Estrela/Polígonos complexos = >10 items
-                    
-                    items = path.get('items', [])
-                    valid_shape = False
                     
                     rect = path['rect']
+                    
+                    # Filtro de Tamanho para avaliar se é pequeno (potencial checkbox/radiobutton)
                     width = rect.width
                     height = rect.height
+                    
+                    ratio = width / height if height > 0 else 0
+                    is_square_or_circle = 0.7 <= ratio <= 1.3
+                    is_potential_checkbox_or_radio = (width < 30 and height < 30 and is_square_or_circle)
 
+                    items = path.get('items', [])
+                    valid_shape = False
+                    is_circle = False # Flag para saber se é puramente curva (círculo)
+                    
                     if len(items) == 1 and items[0][0] == 're':
                         valid_shape = True
                     elif len(items) <= 9:
                         # Permite formas simples mistas (linhas e curvas), ex: rounded rects
-                        # Verifica se contém apenas linhas e curvas
                         valid_types = {'l', 'c', 're'}
                         current_types = {item[0] for item in items}
                         
                         if current_types.issubset(valid_types):
-                            # Se tiver curvas, deve ter linhas também (para evitar círculos/ovais puros que podem ser logos)
-                            # Exceção: se for um círculo pequeno (radio button)
+                            # Se tiver curvas sem linhas (círculos puros)
                             if 'c' in current_types and 'l' not in current_types:
-                                ratio = width / height if height > 0 else 0
-                                is_square = 0.8 <= ratio <= 1.2
-                                if width < 40 and height < 40 and is_square:
+                                if is_potential_checkbox_or_radio:
                                     valid_shape = True
+                                    is_circle = True
                                 else:
                                     valid_shape = False
                             else:
@@ -124,16 +140,8 @@ def process_pdf(input_stream):
                     if not valid_shape:
                         continue
                     
-                    # 2. Filtro de Tamanho: Evitar pequenos artefatos
-                    
-                    # Lógica de Checkbox existente no código verifica proporção depois.
-                    # Vamos permitir passar se for pequeno E quadrado (potencial checkbox)
-                    ratio = width / height if height > 0 else 0
-                    is_square = 0.8 <= ratio <= 1.2
-                    is_potential_checkbox = (width < 40 and height < 40 and is_square)
-
-                    if not is_potential_checkbox:
-                        # Se não for checkbox, exige tamanho mínimo de um campo de texto
+                    if not is_potential_checkbox_or_radio:
+                        # Se não for checkbox/radio, exige tamanho mínimo de um campo de texto
                         if width < 20 or height < 10:
                             continue
 
@@ -141,51 +149,93 @@ def process_pdf(input_stream):
                     if page.get_text("text", clip=rect).strip():
                         continue
                         
-                    replacements.append(rect)
-                    # "Apaga" o desenho cinza original desenhando um retângulo branco por cima
-                    page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), width=0)
+                    # Adiciona ao replacements como uma tupla contendo o retângulo e uma flag indicando se é círculo
+                    replacements.append((rect, is_circle))
 
-        # 2. Criar campos interativos nos locais detectados
-        for rect in replacements:
+        # 1.5 Deduplicação e Ordenação
+        if not replacements:
+            continue
+
+        # Deduplicação: Remove retângulos que se sobrepõem muito
+        unique_replacements = []
+        for r_tuple in replacements:
+            r = r_tuple[0]
+            is_dup = False
+            for existing_tuple in unique_replacements:
+                existing = existing_tuple[0]
+                if are_overlapping(r, existing):
+                    is_dup = True
+                    break
+            if not is_dup:
+                unique_replacements.append(r_tuple)
+        
+        # Ordenação: Topo para Baixo, Esquerda para Direita
+        unique_replacements.sort(key=lambda r_t: (round(r_t[0].y0 / 5) * 5, r_t[0].x0))
+
+        # 1.6 Classificar e Agrupar
+        # (Nesta versão otimizada para estabilidade, mantemos os campos como Checkboxes)
+        small_fields = []
+        text_fields = []
+        
+        for rect, is_circle in unique_replacements:
             width = rect.width
             height = rect.height
-            
-            # Lógica de Classificação
             ratio = width / height if height > 0 else 0
-            is_square = 0.8 <= ratio <= 1.2
-            is_small = width < 40 and height < 40 
+            is_square_or_circle = 0.7 <= ratio <= 1.3
+            is_small = width < 30 and height < 30
             
-            if is_small and is_square:
-                # Checkbox
-                widget = fitz.Widget()
-                widget.rect = rect
-                widget.field_name = f"chk_{int(rect.x0)}_{int(rect.y0)}"
-                widget.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
-                widget.field_value = False
-                widget.field_bgcolor = (0.9, 0.95, 1.0)
-                page.add_widget(widget)
+            if is_small and is_square_or_circle:
+                small_fields.append((rect, is_circle))
+            else:
+                text_fields.append((rect, is_circle))
+
+        # 2. Criar campos interativos (Checkboxes estáveis para permitir desmarcar livremente)
+        for idx, (rect, is_circle) in enumerate(small_fields):
+            # Unificação visual: Se não era círculo, apaga o quadrado e desenha um círculo sem borda
+            if not is_circle:
+                page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1), width=0)
+                center_x = rect.x0 + rect.width / 2
+                center_y = rect.y0 + rect.height / 2
+                radius = min(rect.width, rect.height) / 2
+                # Círculo com cor leve e SEM borda ('sem borda' = width=0)
+                page.draw_circle((center_x, center_y), radius, color=None, fill=(0.9, 0.9, 0.9), width=0)
             
-            elif height > 50:
+            # Criamos uma CHECKBOX internamente para garantir 100% que ela possa ser DESMARCADA
+            widget = fitz.Widget()
+            widget.rect = rect
+            widget.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
+            field_name = f"opt_p{page.number}_{idx}_{int(rect.x0)}"
+            widget.field_name = field_name
+            
+            # Esconde a borda original do widget para o visual mais limpo possível
+            widget.border_width = 0
+            widget.text_font = "ZaDb" 
+            widget.button_caption = "l" # Círculo preenchido no ZapfDingbats
+            widget.text_fontsize = 0
+            
+            page.add_widget(widget)
+
+        # 3. Criar campos de texto (Maiores)
+        for rect, is_circle in text_fields:
+            height = rect.height
+            if height > 50:
                 # TextArea (Multilinha)
                 widget = fitz.Widget()
                 widget.rect = rect
-                widget.field_name = f"txt_multi_{int(rect.x0)}_{int(rect.y0)}"
+                widget.field_name = f"txt_multi_p{page.number}_{int(rect.x0)}_{int(rect.y0)}"
                 widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
                 widget.text_font = font_name
                 widget.text_fontsize = 10 
                 widget.field_flags = fitz.PDF_TX_FIELD_IS_MULTILINE
-                widget.field_bgcolor = (0.9, 0.95, 1.0)
                 page.add_widget(widget)
-            
             else:
                 # Input Normal
                 widget = fitz.Widget()
                 widget.rect = rect
-                widget.field_name = f"input_{int(rect.x0)}_{int(rect.y0)}"
+                widget.field_name = f"input_p{page.number}_{int(rect.x0)}_{int(rect.y0)}"
                 widget.field_type = fitz.PDF_WIDGET_TYPE_TEXT
                 widget.text_font = font_name
                 widget.text_fontsize = max(8, height * 0.6)
-                widget.field_bgcolor = (0.9, 0.95, 1.0)
                 page.add_widget(widget)
 
     output_buffer = io.BytesIO()
